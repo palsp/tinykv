@@ -174,6 +174,7 @@ func newRaft(c *Config) *Raft {
 		votes:            make(map[uint64]bool),
 		electionTimeout:  c.ElectionTick,
 		heartbeatTimeout: c.HeartbeatTick,
+		RaftLog:          newLog(c.Storage),
 	}
 	for _, peer := range c.peers {
 		if peer != c.ID {
@@ -189,8 +190,38 @@ func newRaft(c *Config) *Raft {
 // sendAppend sends an append RPC with new entries (if any) and the
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppend(to uint64) bool {
-	// Your Code Here (2A).
-	return false
+	p := r.Prs[to]
+	newEntries := r.RaftLog.entries[p.Next:]
+	if len(newEntries) == 0 {
+		return false
+	}
+
+	var index uint64
+	var logTerm uint64
+	if p.Next > 0 {
+		index = p.Next - 1
+		var err error
+		logTerm, err = r.RaftLog.Term(index)
+		if err != nil {
+			return false
+		}
+	}
+
+	m := pb.Message{
+		MsgType: pb.MessageType_MsgAppend,
+		From:    r.id,
+		To:      to,
+		Term:    r.Term,
+		Index:   index,
+		LogTerm: logTerm,
+		Commit:  p.Match,
+		Entries: make([]*pb.Entry, len(newEntries)),
+	}
+	for i, e := range newEntries {
+		m.Entries[i] = &e
+	}
+	r.send(m)
+	return true
 }
 
 // sendHeartbeat sends a heartbeat RPC to the given peer.
@@ -274,11 +305,23 @@ func (r *Raft) becomeCandidate() {
 
 // becomeLeader transform this peer's state to leader
 func (r *Raft) becomeLeader() {
-	// Your Code Here (2A).
-	// NOTE: Leader should propose a noop entry on its term
 	r.electionElapsed = 0
 	r.State = StateLeader
 	r.Lead = r.id
+	for peer := range r.Prs {
+		// assume follower fully caught up
+		r.Prs[peer].Next = r.RaftLog.LastIndex() + 1
+	}
+	r.Step(pb.Message{
+		From:    r.id,
+		To:      r.id,
+		MsgType: pb.MessageType_MsgPropose,
+		Entries: []*pb.Entry{{
+			Term:  r.Term,
+			Index: uint64(len(r.RaftLog.entries)),
+			Data:  nil,
+		}},
+	})
 }
 
 // Step the entrance of handle message, see `MessageType`
@@ -309,6 +352,7 @@ func (r *Raft) stepFollower(m pb.Message) error {
 			r.electionElapsed = 0
 			r.Lead = m.From
 		}
+
 	case pb.MessageType_MsgHeartbeat:
 		if r.Term >= m.Term {
 			r.Term = m.Term
@@ -370,6 +414,20 @@ func (r *Raft) stepLeader(m pb.Message) error {
 		for peer := range r.Prs {
 			r.sendHeartbeat(peer)
 		}
+	case pb.MessageType_MsgAppendResponse:
+		r.Prs[m.From].Match = m.Index
+		r.Prs[m.From].Next = m.Index + 1
+	case pb.MessageType_MsgPropose:
+		index := r.RaftLog.LastIndex() + 1
+		for i, e := range m.Entries {
+			r.RaftLog.entries = append(r.RaftLog.entries, pb.Entry{
+				Data:      e.Data,
+				EntryType: e.EntryType,
+				Term:      r.Term,
+				Index:     index + uint64(i),
+			})
+		}
+		r.handleAppendEntries(m)
 	case pb.MessageType_MsgRequestVote:
 		r.send(pb.Message{
 			MsgType: pb.MessageType_MsgRequestVoteResponse,
@@ -392,7 +450,9 @@ func (r *Raft) send(m pb.Message) {
 
 // handleAppendEntries handle AppendEntries RPC request
 func (r *Raft) handleAppendEntries(m pb.Message) {
-	// Your Code Here (2A).
+	for peer := range r.Prs {
+		r.sendAppend(peer)
+	}
 }
 
 // handleHeartbeat handle Heartbeat RPC request
