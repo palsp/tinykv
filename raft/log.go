@@ -54,15 +54,38 @@ type RaftLog struct {
 	pendingSnapshot *pb.Snapshot
 
 	// Your Data Here (2A).
+	firstIndex uint64
 }
 
 // newLog returns log using the given storage. It recovers the log
 // to the state that it just commits and applies the latest snapshot.
 func newLog(storage Storage) *RaftLog {
-	return &RaftLog{
+	r := &RaftLog{
 		storage: storage,
 		entries: make([]pb.Entry, 0),
 	}
+
+	first, err := storage.FirstIndex()
+	if err != nil {
+		fmt.Printf("failed to get first index from storage: %v\n", err)
+		return r
+	}
+	r.firstIndex = first
+
+	last, err := storage.LastIndex()
+	if err != nil {
+		fmt.Printf("failed to get last index from storage: %v\n", err)
+		return r
+	}
+
+	entries, err := storage.Entries(first, last+1)
+	if err != nil {
+		fmt.Printf("failed to get log entries from storage: %v\n", err)
+		return r
+	}
+
+	r.entries = entries
+	return r
 }
 
 // We need to compact the log entries in some point of time like
@@ -84,30 +107,47 @@ func (l *RaftLog) unstableEntries() []pb.Entry {
 	if len(l.entries) == 0 {
 		return []pb.Entry{}
 	}
-	return l.entries[l.stabled+1:]
+	return l.entries[l.toArrIndex(l.stabled+1):]
 }
 
 // nextEnts returns all the committed but not applied entries
 func (l *RaftLog) nextEnts() (ents []pb.Entry) {
-	if len(l.entries) == 0 {
-		return []pb.Entry{}
+	if len(l.entries) == 0 || l.committed <= l.applied {
+		return nil
 	}
-	return l.entries[l.applied+1 : l.committed+1]
+
+	return l.entries[l.toArrIndex(l.applied+1):l.toArrIndex(l.committed+1)]
+}
+
+func (l *RaftLog) NewEnts(next uint64) (ents []pb.Entry) {
+	if len(l.entries) == 0 {
+		return nil
+	}
+	return l.entries[l.toArrIndex(next):]
 }
 
 // LastIndex return the last index of the log entries
 func (l *RaftLog) LastIndex() uint64 {
-	n := len(l.entries)
-	if n == 0 {
-		return 0
-	}
-	return uint64(n - 1)
+	return l.firstIndex + uint64(len(l.entries)) - 1
 }
 
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
-	if int(i) >= len(l.entries) {
+	if i == 0 {
+		return 0, nil
+	}
+
+	if len(l.entries) == 0 {
+		return 0, nil
+	}
+
+	idx := l.toArrIndex(i)
+	if int(idx) >= len(l.entries) {
 		return 0, fmt.Errorf("index out of bound")
 	}
-	return l.entries[i].Term, nil
+	return l.entries[idx].Term, nil
+}
+
+func (l *RaftLog) toArrIndex(i uint64) uint64 {
+	return i - l.firstIndex
 }

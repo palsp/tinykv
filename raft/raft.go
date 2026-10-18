@@ -176,8 +176,9 @@ func newRaft(c *Config) *Raft {
 		heartbeatTimeout: c.HeartbeatTick,
 		RaftLog:          newLog(c.Storage),
 	}
+	last := r.RaftLog.LastIndex()
 	for _, peer := range c.peers {
-		r.Prs[peer] = &Progress{}
+		r.Prs[peer] = &Progress{Match: 0, Next: last + 1}
 	}
 
 	r.randomElectionTimeout()
@@ -189,20 +190,13 @@ func newRaft(c *Config) *Raft {
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppend(to uint64) bool {
 	p := r.Prs[to]
-	newEntries := r.RaftLog.entries[p.Next:]
+	newEntries := r.RaftLog.NewEnts(p.Next)
 	if len(newEntries) == 0 {
 		return false
 	}
 
-	var index uint64
-	var logTerm uint64
-	if p.Next > 0 {
-		index = p.Next - 1
-		var err error
-		logTerm, err = r.RaftLog.Term(index)
-		if err != nil {
-			return false
-		}
+	logTerm, err := r.RaftLog.Term(p.Next - 1)
+	if err != nil {
 	}
 
 	m := pb.Message{
@@ -210,7 +204,7 @@ func (r *Raft) sendAppend(to uint64) bool {
 		From:    r.id,
 		To:      to,
 		Term:    r.Term,
-		Index:   index,
+		Index:   p.Next - 1,
 		LogTerm: logTerm,
 		Commit:  p.Match,
 		Entries: make([]*pb.Entry, len(newEntries)),
@@ -295,18 +289,17 @@ func (r *Raft) becomeLeader() {
 	r.electionElapsed = 0
 	r.State = StateLeader
 	r.Lead = r.id
+	nextIndex := r.RaftLog.LastIndex() + 1
 	for peer := range r.Prs {
 		// assume follower fully caught up
-		r.Prs[peer].Next = r.RaftLog.LastIndex() + 1
+		r.Prs[peer].Next = nextIndex
 	}
 	r.Step(pb.Message{
 		From:    r.id,
 		To:      r.id,
 		MsgType: pb.MessageType_MsgPropose,
 		Entries: []*pb.Entry{{
-			Term:  r.Term,
-			Index: uint64(len(r.RaftLog.entries)),
-			Data:  nil,
+			Data: nil,
 		}},
 	})
 }
