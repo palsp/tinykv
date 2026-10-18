@@ -417,17 +417,20 @@ func (r *Raft) stepLeader(m pb.Message) error {
 	case pb.MessageType_MsgAppendResponse:
 		r.Prs[m.From].Match = m.Index
 		r.Prs[m.From].Next = m.Index + 1
+		r.tryCommit(m.Index)
 	case pb.MessageType_MsgPropose:
-		index := r.RaftLog.LastIndex() + 1
+		lastIndex := r.RaftLog.LastIndex() + 1
 		for i, e := range m.Entries {
+			lastIndex += uint64(i)
 			r.RaftLog.entries = append(r.RaftLog.entries, pb.Entry{
 				Data:      e.Data,
 				EntryType: e.EntryType,
 				Term:      r.Term,
-				Index:     index + uint64(i),
+				Index:     lastIndex,
 			})
 		}
 		r.handleAppendEntries(m)
+		r.tryCommit(lastIndex)
 	case pb.MessageType_MsgRequestVote:
 		r.send(pb.Message{
 			MsgType: pb.MessageType_MsgRequestVoteResponse,
@@ -442,6 +445,25 @@ func (r *Raft) stepLeader(m pb.Message) error {
 		}
 	}
 	return nil
+}
+
+func (r *Raft) tryCommit(index uint64) bool {
+	if r.RaftLog.committed > index {
+		return false
+	}
+
+	ack := uint64(1)
+	for _, progress := range r.Prs {
+		if progress.Match >= index {
+			ack += 1
+		}
+	}
+	if ack*2 > uint64(len(r.Prs))+1 {
+		r.RaftLog.committed = index
+		return true
+	}
+
+	return false
 }
 
 func (r *Raft) send(m pb.Message) {

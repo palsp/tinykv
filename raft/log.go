@@ -92,7 +92,7 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 	if len(l.entries) == 0 {
 		return []pb.Entry{}
 	}
-	return l.entries[l.committed+1 : l.applied+1]
+	return l.entries[l.applied+1 : l.committed+1]
 }
 
 // LastIndex return the last index of the log entries
