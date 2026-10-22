@@ -85,6 +85,7 @@ func newLog(storage Storage) *RaftLog {
 	}
 
 	r.entries = entries
+	r.stabled = last
 	return r
 }
 

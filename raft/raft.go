@@ -206,11 +206,11 @@ func (r *Raft) sendAppend(to uint64) bool {
 		Term:    r.Term,
 		Index:   p.Next - 1,
 		LogTerm: logTerm,
-		Commit:  p.Match,
+		Commit:  r.RaftLog.committed,
 		Entries: make([]*pb.Entry, len(newEntries)),
 	}
-	for i, e := range newEntries {
-		m.Entries[i] = &e
+	for i := range newEntries {
+		m.Entries[i] = &newEntries[i]
 	}
 	r.send(m)
 	return true
@@ -335,6 +335,49 @@ func (r *Raft) stepFollower(m pb.Message) error {
 			r.Lead = m.From
 		}
 
+		found := false || (m.LogTerm == 0 && m.Index == 0)
+		lastIndex := r.RaftLog.LastIndex()
+		for _, ent := range r.RaftLog.entries {
+			if ent.Index == m.Index && m.LogTerm == ent.Term {
+				found = true
+			}
+		}
+
+		if !found {
+			r.send(pb.Message{
+				MsgType: pb.MessageType_MsgAppendResponse,
+				Term:    r.Term,
+				Index:   lastIndex,
+				From:    r.id,
+				To:      m.From,
+				Reject:  true,
+			})
+			return nil
+		}
+
+		for _, ent := range m.Entries {
+			entIdx := int(ent.Index) - 1
+			if entIdx < len(r.RaftLog.entries) {
+				conflict := r.RaftLog.entries[entIdx].Term != ent.Term
+				// Found log conflict, replace
+				if conflict {
+					r.RaftLog.entries = r.RaftLog.entries[:entIdx]
+					r.RaftLog.stabled = ent.Index - 1
+					r.RaftLog.entries = append(r.RaftLog.entries, *ent)
+				}
+			} else {
+				r.RaftLog.entries = append(r.RaftLog.entries, *ent)
+			}
+		}
+		r.RaftLog.committed = m.Commit
+		r.send(pb.Message{
+			MsgType: pb.MessageType_MsgAppendResponse,
+			Term:    r.Term,
+			Index:   m.Commit,
+			From:    r.id,
+			To:      m.From,
+			Reject:  false,
+		})
 	case pb.MessageType_MsgHeartbeat:
 		if r.Term >= m.Term {
 			r.Term = m.Term
@@ -398,8 +441,17 @@ func (r *Raft) stepLeader(m pb.Message) error {
 			}
 		}
 	case pb.MessageType_MsgAppendResponse:
-		r.Prs[m.From].Match = m.Index
-		r.Prs[m.From].Next = m.Index + 1
+		pr := r.Prs[m.From]
+		if m.Reject {
+			pr.Next = min(pr.Next-1, m.Index+1)
+			if pr.Next < 1 {
+				pr.Next = 1
+			}
+			r.sendAppend(m.From)
+			return nil
+		}
+		pr.Match = m.Index
+		pr.Next = m.Index + 1
 		r.tryCommit(m.Index)
 	case pb.MessageType_MsgPropose:
 		lastIndex := r.RaftLog.LastIndex() + 1
