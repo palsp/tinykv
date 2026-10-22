@@ -246,6 +246,9 @@ func (r *Raft) randomElectionTimeout() {
 func (r *Raft) startElection() {
 	r.becomeCandidate()
 
+	lastIndex := r.RaftLog.LastIndex()
+	lastTerm, _ := r.RaftLog.Term(lastIndex)
+
 	for peer := range r.Prs {
 		if peer != r.id {
 			r.send(pb.Message{
@@ -253,6 +256,8 @@ func (r *Raft) startElection() {
 				To:      peer,
 				Term:    r.Term,
 				MsgType: pb.MessageType_MsgRequestVote,
+				LogTerm: lastTerm,
+				Index:   lastIndex,
 			})
 		}
 	}
@@ -388,7 +393,10 @@ func (r *Raft) stepFollower(m pb.Message) error {
 	case pb.MessageType_MsgRequestVote:
 		canVote := r.Vote == None || r.Vote == m.From
 
-		reject := m.Term < r.Term || !canVote
+		lastIndex := r.RaftLog.LastIndex()
+		term, _ := r.RaftLog.Term(lastIndex)
+		upToDate := m.LogTerm > term || (m.LogTerm == term && m.Index >= lastIndex)
+		reject := m.Term < r.Term || !canVote || !upToDate
 		if !reject {
 			r.Vote = m.From
 			r.electionElapsed = 0
