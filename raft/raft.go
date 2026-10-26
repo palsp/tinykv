@@ -176,6 +176,16 @@ func newRaft(c *Config) *Raft {
 		heartbeatTimeout: c.HeartbeatTick,
 		RaftLog:          newLog(c.Storage),
 	}
+	hs, _, err := c.Storage.InitialState()
+	if err != nil {
+		panic(err.Error())
+	}
+	r.Term = hs.Term
+	r.Vote = hs.Vote
+	if hs.Commit > r.RaftLog.committed {
+		r.RaftLog.committed = hs.Commit
+	}
+
 	last := r.RaftLog.LastIndex()
 	for _, peer := range c.peers {
 		r.Prs[peer] = &Progress{Match: 0, Next: last + 1}
@@ -339,9 +349,9 @@ func (r *Raft) stepFollower(m pb.Message) error {
 			r.handleAppendEntries(m)
 		}
 	case pb.MessageType_MsgHeartbeat:
-		if r.Term >= m.Term {
-			r.Term = m.Term
+		if m.Term >= r.Term {
 			r.electionElapsed = 0
+			r.Lead = m.From
 		}
 	case pb.MessageType_MsgHup:
 		r.startElection()
@@ -385,8 +395,8 @@ func (r *Raft) stepCandidate(m pb.Message) error {
 			Reject:  true,
 		})
 	case pb.MessageType_MsgRequestVoteResponse:
-		if m.Term == r.Term && !m.Reject {
-			r.votes[m.From] = true
+		if m.Term == r.Term {
+			r.votes[m.From] = !m.Reject
 
 			r.tryBecomeLeader()
 		}
@@ -475,19 +485,22 @@ func (r *Raft) tryCommit(index uint64) bool {
 	return false
 }
 
-func (r *Raft) tryBecomeLeader() bool {
+func (r *Raft) tryBecomeLeader() {
 	received := uint64(0)
+	rejected := uint64(0)
+
 	for _, vote := range r.votes {
 		if vote {
 			received++
+		} else {
+			rejected++
 		}
 	}
 	if received*2 > uint64(len(r.Prs)) {
 		r.becomeLeader()
-		return true
+	} else if rejected*2 > uint64(len(r.Prs)) {
+		r.becomeFollower(r.Term, None)
 	}
-
-	return false
 }
 
 func (r *Raft) send(m pb.Message) {

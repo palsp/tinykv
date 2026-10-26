@@ -1632,7 +1632,7 @@ func newNetworkWithConfig(configFunc func(*Config), peers ...stateMachine) *netw
 func (nw *network) send(msgs ...pb.Message) {
 	for len(msgs) > 0 {
 		m := msgs[0]
-		// fmt.Printf("process msg: %s Index=%v LogTerm=%v \n", m.MsgType, m.Index, m.LogTerm)
+		// fmt.Printf("process msg: %s From=%v To=%v Term=%v Index=%v LogTerm=%v Reject=%v \n", m.MsgType, m.From, m.To, m.Term, m.Index, m.LogTerm, m.Reject)
 		p := nw.peers[m.To]
 		p.Step(m)
 		msgs = append(msgs[1:], nw.filter(p.readMessages())...)
