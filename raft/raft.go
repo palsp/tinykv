@@ -191,12 +191,10 @@ func newRaft(c *Config) *Raft {
 func (r *Raft) sendAppend(to uint64) bool {
 	p := r.Prs[to]
 	newEntries := r.RaftLog.NewEnts(p.Next)
-	if len(newEntries) == 0 {
-		return false
-	}
 
 	logTerm, err := r.RaftLog.Term(p.Next - 1)
 	if err != nil {
+		return false
 	}
 
 	m := pb.Message{
@@ -338,51 +336,8 @@ func (r *Raft) stepFollower(m pb.Message) error {
 		if m.Term >= r.Term {
 			r.electionElapsed = 0
 			r.Lead = m.From
+			r.handleAppendEntries(m)
 		}
-
-		found := false || (m.LogTerm == 0 && m.Index == 0)
-		lastIndex := r.RaftLog.LastIndex()
-		for _, ent := range r.RaftLog.entries {
-			if ent.Index == m.Index && m.LogTerm == ent.Term {
-				found = true
-			}
-		}
-
-		if !found {
-			r.send(pb.Message{
-				MsgType: pb.MessageType_MsgAppendResponse,
-				Term:    r.Term,
-				Index:   lastIndex,
-				From:    r.id,
-				To:      m.From,
-				Reject:  true,
-			})
-			return nil
-		}
-
-		for _, ent := range m.Entries {
-			entIdx := int(ent.Index) - 1
-			if entIdx < len(r.RaftLog.entries) {
-				conflict := r.RaftLog.entries[entIdx].Term != ent.Term
-				// Found log conflict, replace
-				if conflict {
-					r.RaftLog.entries = r.RaftLog.entries[:entIdx]
-					r.RaftLog.stabled = ent.Index - 1
-					r.RaftLog.entries = append(r.RaftLog.entries, *ent)
-				}
-			} else {
-				r.RaftLog.entries = append(r.RaftLog.entries, *ent)
-			}
-		}
-		r.RaftLog.committed = m.Commit
-		r.send(pb.Message{
-			MsgType: pb.MessageType_MsgAppendResponse,
-			Term:    r.Term,
-			Index:   m.Commit,
-			From:    r.id,
-			To:      m.From,
-			Reject:  false,
-		})
 	case pb.MessageType_MsgHeartbeat:
 		if r.Term >= m.Term {
 			r.Term = m.Term
@@ -460,7 +415,9 @@ func (r *Raft) stepLeader(m pb.Message) error {
 		}
 		pr.Match = m.Index
 		pr.Next = m.Index + 1
-		r.tryCommit(m.Index)
+		if r.tryCommit(m.Index) {
+			r.bcastAppend()
+		}
 	case pb.MessageType_MsgPropose:
 		lastIndex := r.RaftLog.LastIndex() + 1
 		for i, e := range m.Entries {
@@ -474,8 +431,11 @@ func (r *Raft) stepLeader(m pb.Message) error {
 		}
 		r.Prs[r.id].Match = lastIndex
 		r.Prs[r.id].Next = lastIndex + 1
-		r.handleAppendEntries(m)
-		r.tryCommit(lastIndex)
+
+		r.bcastAppend()
+		if r.tryCommit(lastIndex) {
+			r.bcastAppend()
+		}
 	case pb.MessageType_MsgRequestVote:
 		r.send(pb.Message{
 			MsgType: pb.MessageType_MsgRequestVoteResponse,
@@ -493,7 +453,11 @@ func (r *Raft) stepLeader(m pb.Message) error {
 }
 
 func (r *Raft) tryCommit(index uint64) bool {
-	if r.RaftLog.committed > index {
+	if r.RaftLog.committed >= index {
+		return false
+	}
+
+	if t, _ := r.RaftLog.Term(index); t != r.Term {
 		return false
 	}
 
@@ -530,13 +494,64 @@ func (r *Raft) send(m pb.Message) {
 	r.msgs = append(r.msgs, m)
 }
 
-// handleAppendEntries handle AppendEntries RPC request
-func (r *Raft) handleAppendEntries(m pb.Message) {
+func (r *Raft) bcastAppend() {
 	for peer := range r.Prs {
 		if peer != r.id {
 			r.sendAppend(peer)
 		}
 	}
+}
+
+// handleAppendEntries handle AppendEntries RPC request
+func (r *Raft) handleAppendEntries(m pb.Message) {
+	found := false || (m.LogTerm == 0 && m.Index == 0)
+	lastIndex := r.RaftLog.LastIndex()
+	for _, ent := range r.RaftLog.entries {
+		if ent.Index == m.Index && m.LogTerm == ent.Term {
+			found = true
+		}
+	}
+
+	if !found {
+		r.send(pb.Message{
+			MsgType: pb.MessageType_MsgAppendResponse,
+			Term:    r.Term,
+			Index:   lastIndex,
+			From:    r.id,
+			To:      m.From,
+			Reject:  true,
+		})
+		return
+	}
+
+	lastNewEntryIdx := m.Index
+	for _, ent := range m.Entries {
+		lastNewEntryIdx = ent.Index
+
+		entIdx := int(ent.Index) - 1
+		if entIdx < len(r.RaftLog.entries) {
+			conflict := r.RaftLog.entries[entIdx].Term != ent.Term
+			// Found log conflict, replace
+			if conflict {
+				r.RaftLog.entries = r.RaftLog.entries[:entIdx]
+				r.RaftLog.stabled = ent.Index - 1
+				r.RaftLog.entries = append(r.RaftLog.entries, *ent)
+			}
+		} else {
+			r.RaftLog.entries = append(r.RaftLog.entries, *ent)
+		}
+	}
+
+	lastIndex = r.RaftLog.LastIndex()
+	r.RaftLog.committed = min(m.Commit, lastNewEntryIdx)
+	r.send(pb.Message{
+		MsgType: pb.MessageType_MsgAppendResponse,
+		Term:    r.Term,
+		Index:   lastNewEntryIdx,
+		From:    r.id,
+		To:      m.From,
+		Reject:  false,
+	})
 }
 
 // handleHeartbeat handle Heartbeat RPC request
