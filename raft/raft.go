@@ -440,9 +440,9 @@ func (r *Raft) stepLeader(m pb.Message) error {
 			r.bcastAppend()
 		}
 	case pb.MessageType_MsgPropose:
-		lastIndex := r.RaftLog.LastIndex() + 1
-		for i, e := range m.Entries {
-			lastIndex += uint64(i)
+		lastIndex := r.RaftLog.LastIndex()
+		for _, e := range m.Entries {
+			lastIndex++
 			r.RaftLog.entries = append(r.RaftLog.entries, pb.Entry{
 				Data:      e.Data,
 				EntryType: e.EntryType,
