@@ -343,16 +343,13 @@ func (r *Raft) Step(m pb.Message) error {
 func (r *Raft) stepFollower(m pb.Message) error {
 	switch m.MsgType {
 	case pb.MessageType_MsgAppend:
-		if m.Term >= r.Term {
-			r.electionElapsed = 0
-			r.Lead = m.From
-			r.handleAppendEntries(m)
-		}
+		r.electionElapsed = 0
+		r.Lead = m.From
+		r.handleAppendEntries(m)
 	case pb.MessageType_MsgHeartbeat:
-		if m.Term >= r.Term {
-			r.electionElapsed = 0
-			r.Lead = m.From
-		}
+		r.electionElapsed = 0
+		r.Lead = m.From
+		r.handleHeartbeat(m)
 	case pb.MessageType_MsgHup:
 		r.startElection()
 	case pb.MessageType_MsgRequestVote:
@@ -413,6 +410,20 @@ func (r *Raft) stepLeader(m pb.Message) error {
 				r.sendHeartbeat(peer)
 			}
 		}
+	case pb.MessageType_MsgHeartbeatResponse:
+		pr := r.Prs[m.From]
+		lastIndex := r.RaftLog.LastIndex()
+		if pr.Next-1 != m.Index {
+			pr.Next = m.Index + 1
+			if pr.Next > lastIndex {
+				pr.Next = 1
+			}
+		}
+		newEntries := r.RaftLog.NewEnts(pr.Next)
+		if len(newEntries) > 0 {
+			r.sendAppend(m.From)
+		}
+
 	case pb.MessageType_MsgAppendResponse:
 		pr := r.Prs[m.From]
 		if m.Reject {
@@ -569,7 +580,14 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 
 // handleHeartbeat handle Heartbeat RPC request
 func (r *Raft) handleHeartbeat(m pb.Message) {
-	// Your Code Here (2A).
+	lastIndex := r.RaftLog.LastIndex()
+	r.send(pb.Message{
+		MsgType: pb.MessageType_MsgHeartbeatResponse,
+		From:    r.id,
+		To:      m.From,
+		Index:   lastIndex,
+		Term:    r.Term,
+	})
 }
 
 // handleSnapshot handle Snapshot RPC request
