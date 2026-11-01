@@ -79,8 +79,7 @@ func newLog(storage Storage) *RaftLog {
 
 	entries, err := storage.Entries(first, last+1)
 	if err != nil {
-		fmt.Printf("failed to get log entries from storage: %v\n", err)
-		return r
+		panic(fmt.Sprintf("failed to get log entries [%d, %d) from storage: %v", first, last+1, err))
 	}
 
 	r.entries = entries
@@ -133,12 +132,8 @@ func (l *RaftLog) LastIndex() uint64 {
 
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
-	if i == 0 {
-		return 0, nil
-	}
-
-	if len(l.entries) == 0 {
-		return 0, nil
+	if i < l.firstIndex {
+		return l.storage.Term(i)
 	}
 
 	idx := l.toArrIndex(i)

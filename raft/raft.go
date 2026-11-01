@@ -176,7 +176,7 @@ func newRaft(c *Config) *Raft {
 		heartbeatTimeout: c.HeartbeatTick,
 		RaftLog:          newLog(c.Storage),
 	}
-	hs, _, err := c.Storage.InitialState()
+	hs, cs, err := c.Storage.InitialState()
 	if err != nil {
 		panic(err.Error())
 	}
@@ -185,9 +185,14 @@ func newRaft(c *Config) *Raft {
 	if hs.Commit > r.RaftLog.committed {
 		r.RaftLog.committed = hs.Commit
 	}
+	r.RaftLog.applied = c.Applied
 
 	last := r.RaftLog.LastIndex()
-	for _, peer := range c.peers {
+	peers := c.peers
+	if len(peers) == 0 {
+		peers = cs.Nodes
+	}
+	for _, peer := range peers {
 		r.Prs[peer] = &Progress{Match: 0, Next: last + 1}
 	}
 
@@ -411,31 +416,25 @@ func (r *Raft) stepLeader(m pb.Message) error {
 			}
 		}
 	case pb.MessageType_MsgHeartbeatResponse:
-		pr := r.Prs[m.From]
-		lastIndex := r.RaftLog.LastIndex()
-		if pr.Next-1 != m.Index {
-			pr.Next = m.Index + 1
-			if pr.Next > lastIndex {
-				pr.Next = 1
-			}
-		}
-		newEntries := r.RaftLog.NewEnts(pr.Next)
-		if len(newEntries) > 0 {
+		if r.Prs[m.From].Match < r.RaftLog.LastIndex() {
 			r.sendAppend(m.From)
 		}
 
 	case pb.MessageType_MsgAppendResponse:
+		if m.Term < r.Term {
+			return nil // stale response from an older term
+		}
 		pr := r.Prs[m.From]
 		if m.Reject {
 			pr.Next = min(pr.Next-1, m.Index+1)
-			if pr.Next < 1 {
-				pr.Next = 1
+			if pr.Next < r.RaftLog.firstIndex {
+				pr.Next = r.RaftLog.firstIndex
 			}
 			r.sendAppend(m.From)
 			return nil
 		}
-		pr.Match = m.Index
-		pr.Next = m.Index + 1
+		pr.Match = max(pr.Match, m.Index)
+		pr.Next = pr.Match + 1
 		if r.tryCommit(m.Index) {
 			r.bcastAppend()
 		}
@@ -530,10 +529,9 @@ func (r *Raft) bcastAppend() {
 func (r *Raft) handleAppendEntries(m pb.Message) {
 	found := false || (m.LogTerm == 0 && m.Index == 0)
 	lastIndex := r.RaftLog.LastIndex()
-	for _, ent := range r.RaftLog.entries {
-		if ent.Index == m.Index && m.LogTerm == ent.Term {
-			found = true
-		}
+	if m.Index <= lastIndex {
+		term, err := r.RaftLog.Term(m.Index)
+		found = err == nil && term == m.LogTerm
 	}
 
 	if !found {
@@ -551,23 +549,21 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	lastNewEntryIdx := m.Index
 	for _, ent := range m.Entries {
 		lastNewEntryIdx = ent.Index
-
-		entIdx := int(ent.Index) - 1
-		if entIdx < len(r.RaftLog.entries) {
-			conflict := r.RaftLog.entries[entIdx].Term != ent.Term
-			// Found log conflict, replace
-			if conflict {
-				r.RaftLog.entries = r.RaftLog.entries[:entIdx]
-				r.RaftLog.stabled = ent.Index - 1
-				r.RaftLog.entries = append(r.RaftLog.entries, *ent)
+		if ent.Index <= r.RaftLog.LastIndex() {
+			term, _ := r.RaftLog.Term(ent.Index)
+			if term == ent.Term {
+				continue // already have it
 			}
-		} else {
-			r.RaftLog.entries = append(r.RaftLog.entries, *ent)
+			r.RaftLog.entries = r.RaftLog.entries[:r.RaftLog.toArrIndex(ent.Index)]
+			r.RaftLog.stabled = min(r.RaftLog.stabled, ent.Index-1)
 		}
+		r.RaftLog.entries = append(r.RaftLog.entries, *ent)
 	}
 
 	lastIndex = r.RaftLog.LastIndex()
-	r.RaftLog.committed = min(m.Commit, lastNewEntryIdx)
+	if m.Commit > r.RaftLog.committed {
+		r.RaftLog.committed = min(m.Commit, lastNewEntryIdx)
+	}
 	r.send(pb.Message{
 		MsgType: pb.MessageType_MsgAppendResponse,
 		Term:    r.Term,
