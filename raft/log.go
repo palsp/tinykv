@@ -53,7 +53,6 @@ type RaftLog struct {
 	// (Used in 2C)
 	pendingSnapshot *pb.Snapshot
 
-	// Your Data Here (2A).
 	firstIndex uint64
 }
 

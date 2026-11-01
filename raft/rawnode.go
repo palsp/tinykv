@@ -69,7 +69,6 @@ type Ready struct {
 // RawNode is a wrapper of Raft.
 type RawNode struct {
 	Raft *Raft
-	// Your Data Here (2A).
 }
 
 // NewRawNode returns a new RawNode given configuration and a list of raft peers.
@@ -144,20 +143,32 @@ func (rn *RawNode) Step(m pb.Message) error {
 
 // Ready returns the current point-in-time state of this RawNode.
 func (rn *RawNode) Ready() Ready {
-	// Your Code Here (2A).
-	return Ready{}
+	return Ready{
+		Entries:          rn.Raft.RaftLog.unstableEntries(),
+		CommittedEntries: rn.Raft.RaftLog.nextEnts(),
+		Messages:         rn.Raft.msgs,
+	}
 }
 
 // HasReady called when RawNode user need to check if any Ready pending.
 func (rn *RawNode) HasReady() bool {
-	// Your Code Here (2A).
-	return false
+	unstableEnts := rn.Raft.RaftLog.unstableEntries()
+	nextEnts := rn.Raft.RaftLog.nextEnts()
+	return len(unstableEnts) > 0 || len(rn.Raft.msgs) > 0 || len(nextEnts) > 0
 }
 
 // Advance notifies the RawNode that the application has applied and saved progress in the
 // last Ready results.
 func (rn *RawNode) Advance(rd Ready) {
-	// Your Code Here (2A).
+	if len(rd.Entries) > 0 {
+		lastIndex := rd.Entries[len(rd.Entries)-1].Index
+		rn.Raft.RaftLog.stabled = lastIndex
+	}
+
+	if len(rd.CommittedEntries) > 0 {
+		lastIndex := rd.CommittedEntries[len(rd.CommittedEntries)-1].Index
+		rn.Raft.RaftLog.applied = lastIndex
+	}
 }
 
 // GetProgress return the Progress of this node and its peers, if this
