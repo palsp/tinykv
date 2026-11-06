@@ -205,6 +205,14 @@ func newRaft(c *Config) *Raft {
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppend(to uint64) bool {
 	p := r.Prs[to]
+	if r.RaftLog.pendingSnapshot != nil && p.Next < r.RaftLog.pendingSnapshot.Metadata.Index {
+		m := pb.Message{
+			MsgType:  pb.MessageType_MsgSnapshot,
+			Snapshot: r.RaftLog.pendingSnapshot,
+		}
+		r.send(m)
+		return true
+	}
 	newEntries := r.RaftLog.NewEnts(p.Next)
 
 	logTerm, err := r.RaftLog.Term(p.Next - 1)
@@ -357,6 +365,8 @@ func (r *Raft) stepFollower(m pb.Message) error {
 		r.handleHeartbeat(m)
 	case pb.MessageType_MsgHup:
 		r.startElection()
+	case pb.MessageType_MsgSnapshot:
+		r.handleSnapshot(m)
 	case pb.MessageType_MsgRequestVote:
 		canVote := r.Vote == None || r.Vote == m.From
 
@@ -588,7 +598,25 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 
 // handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) {
-	// Your Code Here (2C).
+	meta := m.Snapshot.Metadata
+	last := r.RaftLog.LastIndex()
+	if last > meta.Index {
+		return
+	}
+
+	r.RaftLog.firstIndex = meta.Index + 1
+	r.RaftLog.entries = make([]pb.Entry, 0)
+	r.RaftLog.pendingSnapshot = m.Snapshot
+	r.RaftLog.committed = m.Index
+	r.RaftLog.applied = m.Index
+	r.RaftLog.stabled = m.Index
+
+	last = r.RaftLog.LastIndex()
+	for _, node := range m.Snapshot.Metadata.ConfState.Nodes {
+		if _, ok := r.Prs[node]; !ok {
+			r.Prs[node] = &Progress{Match: 0, Next: last + 1}
+		}
+	}
 }
 
 // addNode add a new node to raft group
