@@ -152,6 +152,9 @@ func (rn *RawNode) Ready() Ready {
 		CommittedEntries: rn.Raft.RaftLog.nextEnts(),
 		Messages:         rn.Raft.msgs,
 	}
+	if rn.Raft.RaftLog.pendingSnapshot != nil {
+		rd.Snapshot = *rn.Raft.RaftLog.pendingSnapshot
+	}
 	if hs := rn.hardState(); !isHardStateEqual(hs, rn.prevHardState) {
 		rd.HardState = hs
 	}
@@ -163,7 +166,9 @@ func (rn *RawNode) Ready() Ready {
 func (rn *RawNode) HasReady() bool {
 	unstableEnts := rn.Raft.RaftLog.unstableEntries()
 	nextEnts := rn.Raft.RaftLog.nextEnts()
-	return len(unstableEnts) > 0 || len(rn.Raft.msgs) > 0 || len(nextEnts) > 0 || !isHardStateEqual(rn.hardState(), rn.prevHardState)
+	return len(unstableEnts) > 0 || len(rn.Raft.msgs) > 0 || len(nextEnts) > 0 ||
+		!isHardStateEqual(rn.hardState(), rn.prevHardState) ||
+		rn.Raft.RaftLog.pendingSnapshot != nil
 }
 
 // Advance notifies the RawNode that the application has applied and saved progress in the
@@ -182,6 +187,12 @@ func (rn *RawNode) Advance(rd Ready) {
 	if !IsEmptyHardState(rd.HardState) {
 		rn.prevHardState = rd.HardState
 	}
+
+	if ps := rn.Raft.RaftLog.pendingSnapshot; ps != nil && !IsEmptySnap(&rd.Snapshot) &&
+		ps.Metadata.Index == rd.Snapshot.Metadata.Index {
+		rn.Raft.RaftLog.pendingSnapshot = nil
+	}
+	rn.Raft.RaftLog.maybeCompact()
 }
 
 // GetProgress return the Progress of this node and its peers, if this

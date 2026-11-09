@@ -48,7 +48,9 @@ func (d *peerMsgHandler) HandleRaftReady() {
 
 	if d.RaftGroup.HasReady() {
 		rd := d.RaftGroup.Ready()
-		d.peerStorage.SaveReadyState(&rd)
+		if _, err := d.peerStorage.SaveReadyState(&rd); err != nil {
+			panic(fmt.Sprintf("%s failed to save ready state: %v", d.Tag, err))
+		}
 		d.Send(d.ctx.trans, rd.Messages)
 		for _, entry := range rd.CommittedEntries {
 			d.process(&entry)
@@ -62,6 +64,10 @@ func (d *peerMsgHandler) process(entry *eraftpb.Entry) {
 	msg := &raft_cmdpb.RaftCmdRequest{}
 	if err := msg.Unmarshal(entry.Data); err != nil {
 		panic(err)
+	}
+	if msg.AdminRequest != nil {
+		d.processAdminReq(entry, msg.AdminRequest)
+		return
 	}
 
 	// collect writes, persist them together with AppliedIndex
@@ -104,6 +110,29 @@ func (d *peerMsgHandler) process(entry *eraftpb.Entry) {
 		}
 	}
 	p.cb.Done(resp)
+}
+
+func (d *peerMsgHandler) processAdminReq(entry *eraftpb.Entry, req *raft_cmdpb.AdminRequest) {
+	applyState := d.peerStorage.applyState
+	compact := false
+	if req.CmdType == raft_cmdpb.AdminCmdType_CompactLog {
+		if req.CompactLog.CompactIndex > applyState.TruncatedState.Index {
+			applyState.TruncatedState = &rspb.RaftTruncatedState{
+				Index: req.CompactLog.CompactIndex,
+				Term:  req.CompactLog.CompactTerm,
+			}
+			compact = true
+		}
+	}
+
+	applyState.AppliedIndex = entry.Index
+	wb := new(engine_util.WriteBatch)
+	wb.SetMeta(meta.ApplyStateKey(d.regionId), applyState)
+	wb.MustWriteToDB(d.peerStorage.Engines.Kv)
+
+	if compact {
+		d.ScheduleCompactLog(applyState.TruncatedState.Index)
+	}
 }
 
 func (d *peerMsgHandler) takeProposal(entry *eraftpb.Entry) *proposal {

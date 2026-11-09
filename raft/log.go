@@ -82,6 +82,8 @@ func newLog(storage Storage) *RaftLog {
 		panic(fmt.Sprintf("failed to get log entries [%d, %d) from storage: %v", first, last+1, err))
 	}
 
+	r.applied = first - 1
+	r.committed = first - 1
 	r.entries = entries
 	r.stabled = last
 	return r
@@ -91,7 +93,23 @@ func newLog(storage Storage) *RaftLog {
 // storage compact stabled log entries prevent the log entries
 // grow unlimitedly in memory
 func (l *RaftLog) maybeCompact() {
-	// Your Code Here (2C).
+	storageFirst, err := l.storage.FirstIndex()
+	if err != nil {
+		panic(err)
+	}
+
+	if storageFirst > l.firstIndex {
+		index := -1
+		for i, ent := range l.entries {
+			if ent.Index >= storageFirst {
+				break
+			}
+			index = i
+		}
+
+		l.entries = l.entries[index+1:]
+		l.firstIndex = storageFirst
+	}
 }
 
 // allEntries return all the entries not compacted.
@@ -145,6 +163,10 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 		return 0, fmt.Errorf("index out of bound")
 	}
 	return l.entries[idx].Term, nil
+}
+
+func (l *RaftLog) isCompacted(i uint64) bool {
+	return i < l.firstIndex
 }
 
 func (l *RaftLog) toArrIndex(i uint64) uint64 {
